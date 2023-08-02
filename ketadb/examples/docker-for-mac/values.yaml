@@ -1,0 +1,38 @@
+---
+replicas: 1
+
+# Permit co-located instances for solitary minikube virtual machines.
+antiAffinity: "soft"
+
+# Shrink default JVM heap.
+KETA_JAVA_OPTS: "-Xmx1024m -Xms1024m"
+
+# Allocate smaller chunks of memory per pod.
+resources:
+  requests:
+    cpu: "100m"
+    memory: "1024M"
+  limits:
+    cpu: "2000m"
+    memory: "2048M"
+
+# Request smaller persistent volumes.
+volumeClaimTemplate:
+  accessModes: [ "ReadWriteOnce" ]
+  storageClassName: "hostpath"
+  resources:
+    requests:
+      storage: 100M
+
+# This parameter must be deployed when the database is mysql
+ketaML:
+  enabled: false
+
+# This parameter must be deployed when the database is mysql
+bootstrap:
+  enabled: false
+
+# This parameter must be deployed when the database is mysql
+ketad:
+  # 是否部署ketad
+  enabled: false

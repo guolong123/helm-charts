@@ -1,0 +1,260 @@
+---
+{{- $namespace := .Release.Namespace -}}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ .Release.Name }}
+  labels:
+    heritage: {{ .Release.Service | quote }}
+    release: {{ .Release.Name | quote }}
+    chart: "{{ .Chart.Name }}"
+    app: "{{ template "ketadb.uname" . }}"
+    {{- range $key, $value := .Values.pod.labels }}
+    {{ $key }}: {{ $value | quote }}
+    {{- end }}
+spec:
+  serviceName: {{ .Release.Name }}
+  selector:
+    matchLabels:
+      release: {{ .Release.Name | quote }}
+      app: "{{ template "ketadb.uname" . }}"
+  replicas: {{ .Values.replicas }}
+  podManagementPolicy: {{ .Values.podManagementPolicy }}
+  updateStrategy:
+    type: {{ .Values.updateStrategy }}
+  {{- if .Values.persistence.enabled }}
+  volumeClaimTemplates:
+  - metadata:
+      name: {{ .Release.Name }}
+    {{- with .Values.persistence.annotations  }}
+      annotations:
+    {{ toYaml . | nindent 8 }}
+    {{- end }}
+    spec:
+    {{ toYaml .Values.volumeClaimTemplate | nindent 8 }}
+  {{- end }}
+  template:
+    metadata:
+      name: "{{ .Release.Name }}"
+      labels:
+        heritage: {{ .Release.Service | quote }}
+        release: {{ .Release.Name | quote }}
+        chart: "{{ .Chart.Name }}"
+        app: "{{ template "ketadb.uname" . }}"
+        {{- range $key, $value := .Values.pod.labels }}
+        {{ $key }}: {{ $value | quote }}
+        {{- end }}
+      annotations:
+        {{- range $key, $value := .Values.pod.annotations }}
+        {{ $key }}: {{ $value | quote }}
+        {{- end }}
+    spec:
+      securityContext:
+        {{ toYaml .Values.podSecurityContext | nindent  8 }}
+      {{- with .Values.tolerations }}
+      tolerations:
+      {{ toYaml . | nindent  6 }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+      {{ toYaml . | nindent  8 }}
+      {{- end }}
+      {{- if or (eq .Values.antiAffinity "hard") (eq .Values.antiAffinity "soft") .Values.nodeAffinity }}
+      {{- if .Values.priorityClassName }}
+      priorityClassName: {{ .Values.priorityClassName }}
+      {{- end }}
+      affinity:
+      {{- end }}
+      {{- if eq .Values.antiAffinity "hard" }}
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchExpressions:
+              - key: app
+                operator: In
+                values:
+                - "{{ template "ketadb.uname" .}}"
+            topologyKey: {{ .Values.antiAffinityTopologyKey }}
+      {{- else if eq .Values.antiAffinity "soft" }}
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 1
+            podAffinityTerm:
+              topologyKey: {{ .Values.antiAffinityTopologyKey }}
+              labelSelector:
+                matchExpressions:
+                - key: app
+                  operator: In
+                  values:
+                  - "{{ template "ketadb.uname" . }}"
+      {{- end }}
+      {{- with .Values.nodeAffinity }}
+        nodeAffinity:
+        {{ toYaml . | indent 10 }}
+      {{- end }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriod }}
+      volumes:
+        - name: ketaconfig
+          configMap:
+            name: {{ .Release.Name }}-config
+      imagePullSecrets:
+      initContainers:
+      {{- if .Values.sysctlInitContainer.enabled }}
+      - name: configure-sysctl
+        securityContext:
+          runAsUser: 0
+          privileged: true
+        image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+        imagePullPolicy: "{{ .Values.image.PullPolicy }}"
+        command: ["sysctl", "-w", "vm.max_map_count={{ .Values.sysctlInitContainer.sysctlVmMaxMapCount }}"]
+        resources:
+        {{ toYaml .Values.sysctlInitContainer.resources | nindent 10 }}
+      {{- end }}
+
+      containers:
+      - name: "{{ template "ketadb.name" . }}"
+        securityContext:
+        {{ toYaml .Values.securityContext | nindent 10 }}
+        image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+        imagePullPolicy: "{{ .Values.image.PullPolicy }}"
+        readinessProbe:
+          tcpSocket:
+            port: 9300
+        {{ toYaml .Values.readinessProbe | nindent 10 }}
+        livenessProbe:
+          tcpSocket:
+            port: 9300
+        {{ toYaml .Values.livenessProbe | nindent 10 }}
+        ports:
+        {{- range $key,$value := .Values.service.ports }}
+          - name: {{ $key }}
+            containerPort: {{ $value }}
+        {{- end }}
+        resources:
+        {{ toYaml .Values.resources | nindent 10 }}
+        env:
+          {{- range $key, $value := .Values.env }}
+          - name: {{ $key }}
+            value: {{ $value | quote }}
+          {{- end }}
+
+          - name: node.name
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.name
+          {{- if eq .Values.roles.master true }}
+          - name: cluster.initial_master_nodes
+            value: "{{ .Release.Name }}"
+          {{- end }}
+
+          - name: discovery.zen.ping.unicast.hosts
+            value: {{ template "ketadb.uname" . }}-headless
+          - name: cluster.name
+            value: {{ .Values.clusterName | default "ketadb" }}
+
+          - name: keta.license.check.interval
+            value: "{{ .Values.licenseCheckInterval }}"
+
+          - name: node.master
+            value: "{{ .Values.roles.master }}"
+          - name: node.web
+            value: "{{ .Values.roles.web }}"
+          - name: node.data
+            value: "{{ .Values.roles.data }}"
+          - name: node.ingest
+            value: "{{ .Values.roles.ingest }}"
+
+          - name: POD_IP
+            valueFrom:
+              fieldRef:
+                fieldPath: status.podIP
+
+          - name: keta.dc.server.url
+          {{- if .Values.dcServerUrl }}
+            value: "{{ .Values.dcServerUrl }}"
+          {{- else if .Values.ingress.enabled }}
+            value: "http://{{ .Values.ingress.hostsSuffix | first }}"
+          {{- else }}
+            value: http://{{ .Release.Name }}:9200
+          {{- end }}
+
+          - name: keta.dc.heartbeat.address
+          {{- if .Values.dcServerHeartbeats }}
+            value: "{{ .Values.dcServerHeartbeats }}"
+          {{- else }}
+            value: "{{ .Release.Name }}:9400"
+          {{- end }}
+
+          - name: keta.dc.data.trans.urls
+          {{- if .Values.dcDataTransUrls }}
+            value: "{{ .Values.dcDataTransUrls }}"
+          {{- else if .Values.ingress.enabled }}
+            value: "http://{{ .Values.ingress.hostsSuffix | first }}"
+          {{- else }}
+            value: http://{{ .Release.Name }}:9200
+          {{- end }}
+
+          - name: keta.alert.host
+          {{- if .Values.alertHost }}
+            value: "{{ .Values.alertHost }}"
+          {{- else if .Values.ingress.enabled }}
+            value: "http://{{ .Values.ingress.hostsSuffix | first }}"
+          {{- else }}
+            value: http://{{ .Release.Name }}:9200
+          {{- end }}
+
+
+        {{- if .Values.envFrom }}
+        envFrom:
+        {{ toYaml .Values.envFrom | nindent 10 }}
+        {{- end }}
+        volumeMounts:
+          {{- if .Values.persistence.enabled }}
+          - name: "{{ .Release.Name }}"
+            mountPath: /usr/share/keta/var
+          {{- end }}
+
+          {{- range .Values.secretMounts }}
+          - name: {{ .name }}
+            mountPath: {{ .path }}
+            {{- if .subPath }}
+            subPath: {{ .subPath }}
+            {{- end }}
+          {{- end }}
+          - name: ketaconfig
+            mountPath: /usr/share/keta/config/keta.yml
+            subPath: keta.yml
+
+          - name: ketaconfig
+            mountPath: /usr/share/keta/config/jvm.options
+            subPath: jvm.options
+
+          - name: ketaconfig
+            mountPath: /usr/share/keta/config/log4j2.properties
+            subPath: log4j2.properties
+
+          - name: ketaconfig
+            mountPath: /usr/share/keta/lib/keta-web/static/config.json
+            subPath: config.json
+
+        {{- if .Values.extraVolumeMounts }}
+        # Currently some extra blocks accept strings
+        # to continue with backwards compatibility this is being kept
+        # whilst also allowing for yaml to be specified too.
+          {{- if eq "string" (printf "%T" .Values.extraVolumeMounts) }}
+            {{ tpl .Values.extraVolumeMounts . | nindent 10 }}
+          {{- else }}
+            {{ toYaml .Values.extraVolumeMounts | nindent 10 }}
+          {{- end }}
+        {{- end }}
+
+      {{- if .Values.extraContainers }}
+      # Currently some extra blocks accept strings
+      # to continue with backwards compatibility this is being kept
+      # whilst also allowing for yaml to be specified too.
+        {{- if eq "string" (printf "%T" .Values.extraContainers) }}
+          {{ tpl .Values.extraContainers . | nindent 6 }}
+        {{- else }}
+          {{ toYaml .Values.extraContainers | nindent 6 }}
+        {{- end }}
+      {{- end }}
